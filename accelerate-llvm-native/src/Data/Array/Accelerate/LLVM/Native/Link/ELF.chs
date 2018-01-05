@@ -1,7 +1,9 @@
 {-# LANGUAGE CPP                      #-}
+{-# LANGUAGE ExplicitForAll           #-}
 {-# LANGUAGE ForeignFunctionInterface #-}
 {-# LANGUAGE MagicHash                #-}
 {-# LANGUAGE RecordWildCards          #-}
+{-# LANGUAGE ScopedTypeVariables      #-}
 {-# LANGUAGE TemplateHaskell          #-}
 -- |
 -- Module      : Data.Array.Accelerate.LLVM.Native.Link.ELF
@@ -40,7 +42,7 @@ import Foreign.Marshal
 import Foreign.Ptr
 import Foreign.Storable
 import GHC.ForeignPtr                                     ( mallocPlainForeignPtrAlignedBytes )
-import GHC.Prim                                           ( addr2Int#, int2Word# )
+import GHC.Prim                                           ( addr2Int#, int2Word#, Proxy#, proxy# )
 import GHC.Ptr                                            ( Ptr(..) )
 import GHC.Word                                           ( Word64(..) )
 import System.IO.Unsafe
@@ -149,7 +151,6 @@ loadSegment obj strtab secs symtab relocs = do
       vmsize      = pad pagesize (vmsize' + (V.length symtab * 16)) -- sections + jump tables
   --
   seg_fp <- mmap vmsize
-  message ("seg_p: " ++ show seg_fp)
   funtab  <- withForeignPtr seg_fp $ \seg_p -> do
               -- Just in case, clear out the segment data (corresponds to NOP).
               -- This also takes care of .bss sections
@@ -228,20 +229,20 @@ processRelocation symtab sec_offset seg_p jump_p Relocation{..} = do
   message (printf "relocation: 0x%04x to symbol %d in section %d, type=%s, value=%s%+d" r_offset r_symbol r_section (show r_type) (B8.unpack sym_name) r_addend)
   case r_type of
     R_X86_64_None -> return ()
-    R_X86_64_64   -> relocate (fromIntegral symval + r_addend)
+    R_X86_64_64   -> relocate (proxy# :: Proxy# Word64) (fromIntegral symval + r_addend)
     R_X86_64_PC32 ->
       let offset = fromIntegral symval + r_addend - fromIntegral pc' in
       if  offset >= 0x7fffffff || offset < -0x80000000
         then do
           let jump'   = castPtrToWord64 (jump_p `plusPtr` (r_symbol * 16 + 8))
               offset' = fromIntegral jump' + r_addend - fromIntegral pc'
-          relocate offset'
+          relocate (proxy# :: Proxy# Int32) offset'
         else
-          relocate offset
+          relocate (proxy# :: Proxy# Int32) offset
 
     R_X86_64_PC64 ->
       let offset = fromIntegral symval + r_addend - fromIntegral pc' in
-      relocate offset
+      relocate (proxy# :: Proxy# Word64) offset
 
     R_X86_64_32   ->
       let value = symval + fromIntegral r_addend in
@@ -249,9 +250,9 @@ processRelocation symtab sec_offset seg_p jump_p Relocation{..} = do
         then do
           let jump'   = castPtrToWord64 (jump_p `plusPtr` (r_symbol * 16 + 8))
               value'  = fromIntegral jump' + r_addend
-          relocate value'
+          relocate (proxy# :: Proxy# Word32) value'
         else
-          relocate (fromIntegral value)
+          relocate (proxy# :: Proxy# Word32) (fromIntegral value)
 
     R_X86_64_32S  ->
       let value = fromIntegral symval + r_addend in
@@ -259,9 +260,9 @@ processRelocation symtab sec_offset seg_p jump_p Relocation{..} = do
         then do
           let jump'   = castPtrToWord64 (jump_p `plusPtr` (r_symbol * 16 + 8))
               value'  = fromIntegral jump' + r_addend
-          relocate' value'
+          relocate (proxy# :: Proxy# Int32) value'
         else
-          relocate' value
+          relocate (proxy# :: Proxy# Int32) value
 
   where
     pc :: Ptr Word8
@@ -277,11 +278,8 @@ processRelocation symtab sec_offset seg_p jump_p Relocation{..} = do
 
     Symbol{..} = symtab V.! r_symbol
 
-    relocate :: Int64 -> IO ()
-    relocate x = poke (castPtr pc :: Ptr Word32) (fromIntegral x)
-
-    relocate' :: Int64 -> IO ()
-    relocate' x = poke (castPtr pc :: Ptr Int32) (fromIntegral x)
+    relocate :: forall a. (Storable a, Num a) => Proxy# a -> Int64 -> IO ()
+    relocate _ x = poke (castPtr pc :: Ptr a) (fromIntegral x)
 
 #else
 precessRelocation =
